@@ -8,6 +8,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
+#define PGNUM ((PHYSTOP - KERNBASE) / PGSIZE)
 
 void freerange(void *pa_start, void *pa_end);
 
@@ -21,12 +22,15 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  uint64 refcnt[PGNUM];
 } kmem;
 
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  for(int i = 0; i < PGNUM; ++i)
+    kmem.refcnt[i] = 0;
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -45,7 +49,13 @@ freerange(void *pa_start, void *pa_end)
 // initializing the allocator; see kinit above.)
 void
 kfree(void *pa)
-{
+{  
+  acquire(&kmem.lock);
+  refcntSub((uint64)pa);
+  if(refcntQuery((uint64)pa) != 0) {
+    release(&kmem.lock);
+    return;
+  }
   struct run *r;
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
@@ -56,7 +66,6 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
   release(&kmem.lock);
@@ -72,11 +81,55 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r) {
     kmem.freelist = r->next;
+    refcntInit((uint64)r);
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+int refcntAdd(uint64 pa) {
+  if(pa < (uint64)end || pa > PHYSTOP) {
+    printf("refcntAdd error: address out of range");
+    return -1;
+  }
+  int k = (pa - (uint64)end) / PGSIZE;
+  acquire(&kmem.lock);
+  ++kmem.refcnt[k];
+  release(&kmem.lock);
+  return 0;
+}
+
+int refcntSub(uint64 pa) {
+  if(pa < (uint64)end || pa > PHYSTOP) {
+    printf("refcntSub error: address out of range");
+    return -1;
+  }
+  int k = (pa - (uint64)end) / PGSIZE;
+  if(kmem.refcnt[k] > 0)
+    --kmem.refcnt[k];
+  return 0;
+}
+
+int refcntInit(uint64 pa) {
+  if(pa < (uint64)end || pa > PHYSTOP) {
+    printf("refcntInit error: address out of range");
+    return -1;
+  }
+  int k = (pa - (uint64)end) / PGSIZE;
+  kmem.refcnt[k] = 1;
+  return 0;
+}
+
+int refcntQuery(uint64 pa) {
+  if(pa < (uint64)end || pa > PHYSTOP) {
+    printf("refcntQuery error: address out of range");
+    return -1;
+  }
+  int k = (pa - (uint64)end) / PGSIZE;
+  return kmem.refcnt[k];
 }

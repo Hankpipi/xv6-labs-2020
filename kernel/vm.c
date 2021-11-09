@@ -173,6 +173,7 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
+  //printf("uvmunmap: va = %p\n", va);
   uint64 a;
   pte_t *pte;
 
@@ -308,25 +309,26 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
+  //printf("uvmcopy: %p %p\n", old, new);
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
-  for(i = 0; i < sz; i += PGSIZE){
+  for(i = 0; i < sz; i += PGSIZE) {
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    if(flags & PTE_W) {
+      flags ^= PTE_W ^ PTE_C;
+      *pte = PA2PTE(pa) | flags;
+    }
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
+    refcntAdd(pa);
   }
   return 0;
 
@@ -358,8 +360,9 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+    if(cowCallback(pagetable, va0) == -1)
+      return -1;
+    if((pa0 = walkaddr(pagetable, va0)) == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
     if(n > len)
@@ -439,4 +442,32 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// Deal with page fault caused by copy-on-write page
+// Return 0 on success, -1 on error, 1 when page fault isn't caused by cow.
+int cowCallback(pagetable_t pagetable, uint64 va) {
+  // printf("cowCallback: pagetable = %p, va = %p\n", pagetable, va);
+  if(va >= MAXVA) 
+    return -1;
+  va = PGROUNDDOWN(va);
+  pte_t *pte;
+  if((pte = walk(pagetable, va, 0)) == 0)
+    return -1;
+  uint64 pa = PTE2PA(*pte);
+  uint flags = PTE_FLAGS(*pte);
+  if(flags & PTE_C) {
+    char *new_pa;
+    if((new_pa = kalloc()) == 0)
+      return -1;
+    memmove(new_pa, (char*)pa, PGSIZE);
+    uvmunmap(pagetable, va, 1, 1);
+    if(mappages(pagetable, va, PGSIZE, (uint64)new_pa, (flags^PTE_C)|PTE_W) < 0) {
+      uvmunmap(pagetable, va, 1, 1);
+      return -1;
+    }
+  } else {
+    return 1;
+  }
+  return 0;
 }
