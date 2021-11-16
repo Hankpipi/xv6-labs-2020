@@ -1,0 +1,1 @@
+srcva + len < srcva 的判断。这是为了防止srcva + len超出uint64的范围。
