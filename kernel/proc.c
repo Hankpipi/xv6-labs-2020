@@ -274,6 +274,11 @@ fork(void)
     return -1;
   }
 
+  for(int i = 0; i < MAXVMA; ++i) {
+    if(!p->vma[i].used) continue;
+    memmove(&np->vma[i], &p->vma[i], sizeof(struct VMA));
+  }
+
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
@@ -344,6 +349,11 @@ exit(int status)
   if(p == initproc)
     panic("init exiting");
 
+  for(int i = 0; i < MAXVMA; ++i) {
+    struct VMA* vma = &p->vma[i];
+    if(!vma->used) continue;
+    uvmunmap(p->pagetable, PGROUNDDOWN(vma->addr), PGROUNDUP(vma->len) / PGSIZE, 1);
+  }
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
